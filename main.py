@@ -175,13 +175,23 @@ def download_video(
             }
         ]
 
-    # Si existe un archivo cookies.txt (exportado desde el navegador con
-    # sesión iniciada), lo usamos. Algunos posts/reels/videos privados o
-    # con restricción de edad exigen estar logueado, incluso siendo
-    # contenido "público" a simple vista.
-    cookies_path = Path(__file__).parent / "cookies.txt"
-    if cookies_path.exists():
-        ydl_opts["cookiefile"] = str(cookies_path)
+    # Si existe un archivo cookies.txt, lo usamos. Algunos posts/reels/videos
+    # privados, con restricción de edad, o con detección de "no soy un bot"
+    # (YouTube) exigen estar logueado, incluso siendo contenido "público" a
+    # simple vista.
+    #
+    # Prioridad de búsqueda:
+    #   1) Render "Secret Files" (/etc/secrets/cookies.txt) -> NUNCA se sube
+    #      a GitHub, es la forma segura de guardar esto.
+    #   2) Un cookies.txt junto al código (solo para desarrollo local;
+    #      no lo subas a un repo público, expone tu sesión iniciada).
+    render_secret_path = Path("/etc/secrets/cookies.txt")
+    local_cookies_path = Path(__file__).parent / "cookies.txt"
+
+    if render_secret_path.exists():
+        ydl_opts["cookiefile"] = str(render_secret_path)
+    elif local_cookies_path.exists():
+        ydl_opts["cookiefile"] = str(local_cookies_path)
 
     extension_esperada = "mp3" if formato == FormatoDescarga.mp3 else "mp4"
 
