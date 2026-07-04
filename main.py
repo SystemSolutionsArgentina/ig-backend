@@ -23,6 +23,7 @@ Novedades de esta versión:
 - Soporte para YouTube, TikTok y Facebook, además de Instagram.
 """
 
+import shutil
 import uuid
 import tempfile
 from enum import Enum
@@ -46,6 +47,14 @@ app.add_middleware(
 
 DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "ig_downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+# Render monta los "Secret Files" como SOLO LECTURA, pero yt-dlp necesita
+# poder re-escribir el archivo de cookies (actualiza cookies de sesión
+# mientras descarga). Por eso copiamos el secreto a una ubicación temporal
+# donde sí se puede escribir, una sola vez al arrancar el servidor.
+RENDER_SECRET_COOKIES = Path("/etc/secrets/cookies.txt")
+LOCAL_COOKIES = Path(__file__).parent / "cookies.txt"
+RUNTIME_COOKIES = Path(tempfile.gettempdir()) / "cookies_runtime.txt"
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -175,23 +184,12 @@ def download_video(
             }
         ]
 
-    # Si existe un archivo cookies.txt, lo usamos. Algunos posts/reels/videos
-    # privados, con restricción de edad, o con detección de "no soy un bot"
-    # (YouTube) exigen estar logueado, incluso siendo contenido "público" a
-    # simple vista.
-    #
-    # Prioridad de búsqueda:
-    #   1) Render "Secret Files" (/etc/secrets/cookies.txt) -> NUNCA se sube
-    #      a GitHub, es la forma segura de guardar esto.
-    #   2) Un cookies.txt junto al código (solo para desarrollo local;
-    #      no lo subas a un repo público, expone tu sesión iniciada).
-    render_secret_path = Path("/etc/secrets/cookies.txt")
-    local_cookies_path = Path(__file__).parent / "cookies.txt"
-
-    if render_secret_path.exists():
-        ydl_opts["cookiefile"] = str(render_secret_path)
-    elif local_cookies_path.exists():
-        ydl_opts["cookiefile"] = str(local_cookies_path)
+    # Si en el arranque del servidor se preparó un cookies.txt (ver
+    # `preparar_cookies_escribibles`), lo usamos. Esto ayuda quando el
+    # sitio exige estar logueado (YouTube con "confirmá que no sos un bot",
+    # posts/reels privados, videos de Facebook que piden login, etc.)
+    if RUNTIME_COOKIES.exists():
+        ydl_opts["cookiefile"] = str(RUNTIME_COOKIES)
 
     extension_esperada = "mp3" if formato == FormatoDescarga.mp3 else "mp4"
 
@@ -225,6 +223,33 @@ def download_video(
         raise HTTPException(status_code=422, detail=f"No se pudo descargar el archivo: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error inesperado: {str(e)}")
+
+
+@app.on_event("startup")
+def preparar_cookies_escribibles():
+    """
+    Copia el archivo de cookies a una ubicación temporal donde yt-dlp SÍ
+    puede escribir (Render monta /etc/secrets como solo lectura).
+
+    Prioridad:
+      1) Render Secret File en /etc/secrets/cookies.txt (forma segura,
+         nunca pasa por GitHub).
+      2) Un cookies.txt junto al código (solo para pruebas locales; no
+         subir esto a un repo público, expone tu sesión iniciada).
+    """
+    origen = None
+    if RENDER_SECRET_COOKIES.exists():
+        origen = RENDER_SECRET_COOKIES
+    elif LOCAL_COOKIES.exists():
+        origen = LOCAL_COOKIES
+
+    if origen is not None:
+        try:
+            shutil.copyfile(origen, RUNTIME_COOKIES)
+        except Exception:
+            # Si por algún motivo falla la copia, seguimos sin cookies en
+            # vez de tirar abajo el arranque del servidor.
+            pass
 
 
 @app.on_event("startup")
