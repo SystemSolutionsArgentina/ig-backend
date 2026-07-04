@@ -1,14 +1,16 @@
 """
-Backend para descargar videos de Instagram usando yt-dlp.
+Backend para descargar videos de Instagram, YouTube, TikTok y Facebook
+usando yt-dlp.
 
 Por qué esto es "robusto":
 - yt-dlp es una librería open source mantenida activamente por una gran
-  comunidad. Cuando Instagram cambia su formato interno, yt-dlp se actualiza
-  (generalmente en horas o pocos días) y vos solo necesitás actualizar la
-  versión de la librería (`pip install -U yt-dlp`), sin tocar la app Android
-  ni el resto del backend.
-- Toda la lógica "frágil" (parsear HTML/JSON de Instagram) queda encapsulada
-  acá, lejos de la app que instalás en tu celular.
+  comunidad, con soporte para cientos de sitios (incluidos los 4 de acá).
+  Cuando alguno de estos sitios cambia su formato interno, yt-dlp se
+  actualiza (generalmente en horas o pocos días) y vos solo necesitás
+  actualizar la versión de la librería (`pip install -U yt-dlp`), sin tocar
+  la app Android ni el resto del backend.
+- Toda la lógica "frágil" (parsear HTML/JSON de cada sitio) queda
+  encapsulada acá, lejos de la app que instalás en tu celular/PC.
 
 Novedades de esta versión:
 - Fix de audio: antes se usaba format="best[ext=mp4]/best", que en muchos
@@ -18,6 +20,7 @@ Novedades de esta versión:
 - Selección de formato y calidad: los parámetros `formato` (mp4/mp3) y
   `calidad` usan Enums de Python, lo que hace que en la documentación
   interactiva de FastAPI (/docs) aparezcan como menús desplegables.
+- Soporte para YouTube, TikTok y Facebook, además de Instagram.
 """
 
 import uuid
@@ -45,6 +48,22 @@ DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "ig_downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+
+# Plataformas soportadas. yt-dlp funciona con cientos de sitios, pero acá
+# limitamos explícitamente a las 4 que pediste, para dar mensajes de error
+# más claros si alguien manda un link de otro sitio no soportado/probado.
+DOMINIOS_SOPORTADOS = (
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "facebook.com",
+    "fb.watch",
+)
+
+
+def es_link_soportado(url: str) -> bool:
+    return any(dominio in url for dominio in DOMINIOS_SOPORTADOS)
 
 
 class FormatoDescarga(str, Enum):
@@ -91,20 +110,24 @@ def health_check():
 
 @app.get("/download")
 def download_video(
-    url: str = Query(..., description="Link del post/reel de Instagram"),
+    url: str = Query(..., description="Link del video (Instagram, YouTube, TikTok o Facebook)"),
     formato: FormatoDescarga = Query(FormatoDescarga.mp4, description="Formato de salida"),
     calidad: CalidadDescarga = Query(CalidadDescarga.mejor, description="Calidad deseada"),
 ):
     """
-    Descarga un video de Instagram y lo devuelve como archivo mp4 o mp3.
+    Descarga un video de Instagram, YouTube, TikTok o Facebook y lo
+    devuelve como archivo mp4 o mp3.
 
     Ejemplos:
       GET /download?url=...&formato=mp4&calidad=1080p
       GET /download?url=...&formato=mp3&calidad=192kbps
       GET /download?url=...   (usa mp4 + mejor calidad por defecto)
     """
-    if "instagram.com" not in url:
-        raise HTTPException(status_code=400, detail="El link no parece ser de Instagram")
+    if not es_link_soportado(url):
+        raise HTTPException(
+            status_code=400,
+            detail="El link no parece ser de Instagram, YouTube, TikTok o Facebook",
+        )
 
     # Validar que la combinación formato + calidad tenga sentido
     if formato == FormatoDescarga.mp4 and calidad not in CALIDADES_VALIDAS_MP4:
@@ -153,8 +176,9 @@ def download_video(
         ]
 
     # Si existe un archivo cookies.txt (exportado desde el navegador con
-    # sesión iniciada en Instagram), lo usamos. Muchos posts/reels de
-    # Instagram exigen estar logueado, incluso siendo contenido público.
+    # sesión iniciada), lo usamos. Algunos posts/reels/videos privados o
+    # con restricción de edad exigen estar logueado, incluso siendo
+    # contenido "público" a simple vista.
     cookies_path = Path(__file__).parent / "cookies.txt"
     if cookies_path.exists():
         ydl_opts["cookiefile"] = str(cookies_path)
@@ -181,14 +205,14 @@ def download_video(
 
         return FileResponse(
             path=str(final_path),
-            filename=f"instagram_{job_id}.{extension_esperada}",
+            filename=f"descarga_{job_id}.{extension_esperada}",
             media_type=media_type,
         )
 
     except yt_dlp.utils.DownloadError as e:
-        # Este es el error más común cuando Instagram cambia algo o el post
-        # es privado / no existe. Lo devolvemos como mensaje claro.
-        raise HTTPException(status_code=422, detail=f"No se pudo descargar el video: {str(e)}")
+        # Este es el error más común cuando el sitio cambia algo o el
+        # contenido es privado / no existe. Lo devolvemos como mensaje claro.
+        raise HTTPException(status_code=422, detail=f"No se pudo descargar el archivo: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error inesperado: {str(e)}")
 
