@@ -114,10 +114,16 @@ BITRATE_POR_CALIDAD_MP3 = {
 @app.get("/")
 def health_check():
     """Endpoint simple para verificar que el servidor está vivo."""
+    cookies_info = {
+        "secret_file_existe": RENDER_SECRET_COOKIES.exists(),
+        "copia_escribible_existe": RUNTIME_COOKIES.exists(),
+        "copia_escribible_bytes": RUNTIME_COOKIES.stat().st_size if RUNTIME_COOKIES.exists() else 0,
+    }
     return {
         "status": "ok",
         "service": "media-downloader",
         "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies": cookies_info,
     }
 
 
