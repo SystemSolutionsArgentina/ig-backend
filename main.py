@@ -1,5 +1,5 @@
 """
-Backend para descargar videos de Instagram, YouTube, TikTok y Facebook
+Backend para descargar videos de Instagram, TikTok y Facebook
 usando yt-dlp.
 
 Por qué esto es "robusto":
@@ -20,7 +20,7 @@ Novedades de esta versión:
 - Selección de formato y calidad: los parámetros `formato` (mp4/mp3) y
   `calidad` usan Enums de Python, lo que hace que en la documentación
   interactiva de FastAPI (/docs) aparezcan como menús desplegables.
-- Soporte para YouTube, TikTok y Facebook, además de Instagram.
+- Soporte para TikTok y Facebook, además de Instagram.
 """
 
 import shutil
@@ -63,8 +63,6 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 # más claros si alguien manda un link de otro sitio no soportado/probado.
 DOMINIOS_SOPORTADOS = (
     "instagram.com",
-    "youtube.com",
-    "youtu.be",
     "tiktok.com",
     "facebook.com",
     "fb.watch",
@@ -129,12 +127,12 @@ def health_check():
 
 @app.get("/download")
 def download_video(
-    url: str = Query(..., description="Link del video (Instagram, YouTube, TikTok o Facebook)"),
+    url: str = Query(..., description="Link del video (Instagram, TikTok o Facebook)"),
     formato: FormatoDescarga = Query(FormatoDescarga.mp4, description="Formato de salida"),
     calidad: CalidadDescarga = Query(CalidadDescarga.mejor, description="Calidad deseada"),
 ):
     """
-    Descarga un video de Instagram, YouTube, TikTok o Facebook y lo
+    Descarga un video de Instagram, TikTok o Facebook y lo
     devuelve como archivo mp4 o mp3.
 
     Ejemplos:
@@ -145,7 +143,7 @@ def download_video(
     if not es_link_soportado(url):
         raise HTTPException(
             status_code=400,
-            detail="El link no parece ser de Instagram, YouTube, TikTok o Facebook",
+            detail="El link no parece ser de Instagram, TikTok o Facebook",
         )
 
     # Validar que la combinación formato + calidad tenga sentido
