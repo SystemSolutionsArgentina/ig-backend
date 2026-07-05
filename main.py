@@ -167,12 +167,6 @@ def download_video(
         "no_warnings": True,
         # Evita que un solo pedido cuelgue el server para siempre
         "socket_timeout": 30,
-        # YouTube a veces no expone ningún formato al cliente "web" por
-        # defecto (por sus protecciones anti-bot). Probamos con varios
-        # "clientes" en orden hasta que alguno devuelva formatos.
-        "extractor_args": {
-            "youtube": {"player_client": ["android", "ios", "web"]},
-        },
     }
 
     if formato == FormatoDescarga.mp4:
