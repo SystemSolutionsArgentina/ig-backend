@@ -48,6 +48,23 @@ def _es_url_valida(url):
     return url.startswith("http://") or url.startswith("https://")
 
 
+def _ruta_cookies():
+    """
+    Busca cookies.txt en dos ubicaciones posibles:
+    - Junto al código (funciona en despliegues sin Docker).
+    - /etc/secrets/cookies.txt (donde Render coloca los "Secret Files" en
+      despliegues Docker, que es el caso de este backend).
+    """
+    candidatos = [
+        Path(__file__).parent / "cookies.txt",
+        Path("/etc/secrets/cookies.txt"),
+    ]
+    for candidato in candidatos:
+        if candidato.exists():
+            return candidato
+    return None
+
+
 def _opciones_base(cookies_path):
     opts = {
         "quiet": True,
@@ -56,7 +73,7 @@ def _opciones_base(cookies_path):
         "noplaylist": True,
         "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
-    if cookies_path.exists():
+    if cookies_path is not None:
         opts["cookiefile"] = str(cookies_path)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -87,7 +104,7 @@ def obtener_info(url: str = Query(...)):
     if not _es_url_valida(url):
         raise HTTPException(status_code=400, detail="URL inválida")
 
-    cookies_path = Path(__file__).parent / "cookies.txt"
+    cookies_path = _ruta_cookies()
     opts, _ = _opciones_base(cookies_path)
     opts["skip_download"] = True
 
@@ -108,7 +125,7 @@ def download_video(
     if not _es_url_valida(url):
         raise HTTPException(status_code=400, detail="URL inválida")
 
-    cookies_path = Path(__file__).parent / "cookies.txt"
+    cookies_path = _ruta_cookies()
     opts, hay_ffmpeg = _opciones_base(cookies_path)
 
     if formato == "MP3" and not hay_ffmpeg:
