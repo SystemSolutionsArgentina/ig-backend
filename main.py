@@ -83,7 +83,6 @@ def _opciones_base(cookies_path):
         "no_warnings": True,
         "socket_timeout": 30,
         "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
     if cookies_path is not None:
         opts["cookiefile"] = str(cookies_path)
