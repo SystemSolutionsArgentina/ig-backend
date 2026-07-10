@@ -54,14 +54,26 @@ def _ruta_cookies():
     - Junto al código (funciona en despliegues sin Docker).
     - /etc/secrets/cookies.txt (donde Render coloca los "Secret Files" en
       despliegues Docker, que es el caso de este backend).
+
+    Si lo encuentra en /etc/secrets (de solo lectura), lo copia a una
+    carpeta temporal con permisos de escritura: yt-dlp a veces intenta
+    re-guardar el archivo de cookies actualizado después de usarlo, y eso
+    falla si el archivo original es de solo lectura.
     """
-    candidatos = [
-        Path(__file__).parent / "cookies.txt",
-        Path("/etc/secrets/cookies.txt"),
-    ]
-    for candidato in candidatos:
-        if candidato.exists():
-            return candidato
+    local = Path(__file__).parent / "cookies.txt"
+    if local.exists():
+        return local
+
+    secreto = Path("/etc/secrets/cookies.txt")
+    if secreto.exists():
+        copia = Path(tempfile.gettempdir()) / "cookies_copia.txt"
+        try:
+            if not copia.exists() or copia.stat().st_mtime < secreto.stat().st_mtime:
+                shutil.copy(str(secreto), str(copia))
+            return copia
+        except Exception:
+            return secreto  # si algo falla al copiar, al menos intentamos con el original
+
     return None
 
 
