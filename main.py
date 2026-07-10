@@ -1,43 +1,31 @@
 """
-Backend para descargar videos de Instagram, TikTok y Facebook
-usando yt-dlp.
+Backend para descargar videos de Instagram, YouTube, Facebook, TikTok y
+cientos de sitios más, usando yt-dlp. Pensado para la app de Android
+(y cualquier otro cliente que le quiera pegar).
+
+Endpoints:
+- GET /info?url=...            -> metadata liviana (título) sin descargar
+- GET /download?url=...&formato=MP4|MP3&calidad=...  -> descarga el archivo
 
 Por qué esto es "robusto":
-- yt-dlp es una librería open source mantenida activamente por una gran
-  comunidad, con soporte para cientos de sitios (incluidos los 4 de acá).
-  Cuando alguno de estos sitios cambia su formato interno, yt-dlp se
-  actualiza (generalmente en horas o pocos días) y vos solo necesitás
-  actualizar la versión de la librería (`pip install -U yt-dlp`), sin tocar
-  la app Android ni el resto del backend.
-- Toda la lógica "frágil" (parsear HTML/JSON de cada sitio) queda
-  encapsulada acá, lejos de la app que instalás en tu celular/PC.
-
-Novedades de esta versión:
-- Fix de audio: antes se usaba format="best[ext=mp4]/best", que en muchos
-  Reels de Instagram termina eligiendo el stream de SOLO VIDEO (sin audio),
-  porque Instagram separa video y audio en pistas distintas. Ahora se pide
-  explícitamente "mejor video + mejor audio" y se combinan con ffmpeg.
-- Selección de formato y calidad: los parámetros `formato` (mp4/mp3) y
-  `calidad` usan Enums de Python, lo que hace que en la documentación
-  interactiva de FastAPI (/docs) aparezcan como menús desplegables.
-- Soporte para TikTok y Facebook, además de Instagram.
+- yt-dlp es mantenido activamente por una gran comunidad y soporta
+  cientos de sitios. Cuando alguno cambia su formato interno, alcanza con
+  actualizar la librería (`pip install -U yt-dlp`), sin tocar la app.
 """
 
-import shutil
 import uuid
+import shutil
 import tempfile
-from enum import Enum
+import urllib.parse
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import imageio_ffmpeg
 import yt_dlp
 
-app = FastAPI(title="IG Video Downloader")
+app = FastAPI(title="Video Downloader Backend")
 
-# Permite que la app Android (y cualquier cliente) le pegue a este backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,224 +33,179 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "ig_downloads"
+DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "video_downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-# Render monta los "Secret Files" como SOLO LECTURA, pero yt-dlp necesita
-# poder re-escribir el archivo de cookies (actualiza cookies de sesión
-# mientras descarga). Por eso copiamos el secreto a una ubicación temporal
-# donde sí se puede escribir, una sola vez al arrancar el servidor.
-RENDER_SECRET_COOKIES = Path("/etc/secrets/cookies.txt")
-LOCAL_COOKIES = Path(__file__).parent / "cookies.txt"
-RUNTIME_COOKIES = Path(tempfile.gettempdir()) / "cookies_runtime.txt"
-
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-
-# Plataformas soportadas. yt-dlp funciona con cientos de sitios, pero acá
-# limitamos explícitamente a las 4 que pediste, para dar mensajes de error
-# más claros si alguien manda un link de otro sitio no soportado/probado.
-DOMINIOS_SOPORTADOS = (
-    "instagram.com",
-    "tiktok.com",
-    "facebook.com",
-    "fb.watch",
-)
-
-
-def es_link_soportado(url: str) -> bool:
-    return any(dominio in url for dominio in DOMINIOS_SOPORTADOS)
-
-
-class FormatoDescarga(str, Enum):
-    mp4 = "mp4"
-    mp3 = "mp3"
-
-
-class CalidadDescarga(str, Enum):
-    mejor = "mejor"
-    p1080 = "1080p"
-    p720 = "720p"
-    p480 = "480p"
-    kbps320 = "320kbps"
-    kbps192 = "192kbps"
-    kbps128 = "128kbps"
-
-
-# Calidades válidas según el formato elegido
-CALIDADES_VALIDAS_MP4 = {CalidadDescarga.mejor, CalidadDescarga.p1080, CalidadDescarga.p720, CalidadDescarga.p480}
-CALIDADES_VALIDAS_MP3 = {CalidadDescarga.mejor, CalidadDescarga.kbps320, CalidadDescarga.kbps192, CalidadDescarga.kbps128}
-
-# Mapeo de calidad -> selector de formato de yt-dlp (para video mp4)
-FORMATO_YTDLP_POR_CALIDAD_MP4 = {
-    CalidadDescarga.mejor: "bv*+ba/b",
-    CalidadDescarga.p1080: "bv*[height<=1080]+ba/b[height<=1080]",
-    CalidadDescarga.p720: "bv*[height<=720]+ba/b[height<=720]",
-    CalidadDescarga.p480: "bv*[height<=480]+ba/b[height<=480]",
+CALIDADES_MP3 = {
+    "La mejor calidad": "0",
+    "320 kbps": "320",
+    "192 kbps": "192",
+    "128 kbps": "128",
 }
 
-# Mapeo de calidad -> bitrate de audio (para extracción mp3)
-BITRATE_POR_CALIDAD_MP3 = {
-    CalidadDescarga.mejor: "320",
-    CalidadDescarga.kbps320: "320",
-    CalidadDescarga.kbps192: "192",
-    CalidadDescarga.kbps128: "128",
-}
+
+def _es_url_valida(url):
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def _opciones_base(cookies_path):
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+    }
+    if cookies_path.exists():
+        opts["cookiefile"] = str(cookies_path)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        opts["ffmpeg_location"] = ffmpeg
+    return opts, (ffmpeg is not None)
+
+
+def _obtener_titulo(info):
+    titulo = (info.get("title") or "").strip()
+    if not titulo or titulo.lower().startswith("video by"):
+        descripcion = (info.get("description") or "").strip()
+        if descripcion:
+            titulo = descripcion
+    if not titulo:
+        titulo = "video"
+    return titulo.split("\n")[0].strip()[:150]
 
 
 @app.get("/")
 def health_check():
-    """Endpoint simple para verificar que el servidor está vivo."""
-    cookies_info = {
-        "secret_file_existe": RENDER_SECRET_COOKIES.exists(),
-        "copia_escribible_existe": RUNTIME_COOKIES.exists(),
-        "copia_escribible_bytes": RUNTIME_COOKIES.stat().st_size if RUNTIME_COOKIES.exists() else 0,
-    }
-    return {
-        "status": "ok",
-        "service": "media-downloader",
-        "yt_dlp_version": yt_dlp.version.__version__,
-        "cookies": cookies_info,
-    }
+    return {"status": "ok", "service": "video-downloader-backend"}
+
+
+@app.get("/info")
+def obtener_info(url: str = Query(...)):
+    """Devuelve solo el título, sin descargar nada (para sugerir el nombre
+    de archivo antes de arrancar la descarga real)."""
+    if not _es_url_valida(url):
+        raise HTTPException(status_code=400, detail="URL inválida")
+
+    cookies_path = Path(__file__).parent / "cookies.txt"
+    opts, _ = _opciones_base(cookies_path)
+    opts["skip_download"] = True
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        return {"titulo": _obtener_titulo(info)}
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"No se pudo obtener información: {str(e)}")
 
 
 @app.get("/download")
 def download_video(
-    url: str = Query(..., description="Link del video (Instagram, TikTok o Facebook)"),
-    formato: FormatoDescarga = Query(FormatoDescarga.mp4, description="Formato de salida"),
-    calidad: CalidadDescarga = Query(CalidadDescarga.mejor, description="Calidad deseada"),
+    url: str = Query(...),
+    formato: str = Query("MP4", description="MP4 o MP3"),
+    calidad: str = Query("La mejor (recomendado)"),
 ):
-    """
-    Descarga un video de Instagram, TikTok o Facebook y lo
-    devuelve como archivo mp4 o mp3.
+    if not _es_url_valida(url):
+        raise HTTPException(status_code=400, detail="URL inválida")
 
-    Ejemplos:
-      GET /download?url=...&formato=mp4&calidad=1080p
-      GET /download?url=...&formato=mp3&calidad=192kbps
-      GET /download?url=...   (usa mp4 + mejor calidad por defecto)
-    """
-    if not es_link_soportado(url):
+    cookies_path = Path(__file__).parent / "cookies.txt"
+    opts, hay_ffmpeg = _opciones_base(cookies_path)
+
+    if formato == "MP3" and not hay_ffmpeg:
         raise HTTPException(
-            status_code=400,
-            detail="El link no parece ser de Instagram, TikTok o Facebook",
+            status_code=500,
+            detail="El servidor no tiene ffmpeg disponible, no se puede convertir a MP3",
         )
 
-    # Validar que la combinación formato + calidad tenga sentido
-    if formato == FormatoDescarga.mp4 and calidad not in CALIDADES_VALIDAS_MP4:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Calidad '{calidad.value}' no es válida para mp4. "
-                   f"Opciones válidas: {[c.value for c in CALIDADES_VALIDAS_MP4]}",
-        )
-    if formato == FormatoDescarga.mp3 and calidad not in CALIDADES_VALIDAS_MP3:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Calidad '{calidad.value}' no es válida para mp3. "
-                   f"Opciones válidas: {[c.value for c in CALIDADES_VALIDAS_MP3]}",
-        )
-
-    # Nombre de archivo único para evitar colisiones entre pedidos simultáneos
     job_id = str(uuid.uuid4())
     output_template = str(DOWNLOAD_DIR / f"{job_id}.%(ext)s")
+    opts["outtmpl"] = output_template
 
-    ydl_opts = {
-        "outtmpl": output_template,
-        "ffmpeg_location": FFMPEG_PATH,
-        "quiet": True,
-        "no_warnings": True,
-        # Evita que un solo pedido cuelgue el server para siempre
-        "socket_timeout": 30,
-    }
-
-    if formato == FormatoDescarga.mp4:
-        # Pedimos el mejor video + el mejor audio por separado, y que
-        # yt-dlp los combine (mux) usando ffmpeg. Esto asegura que el
-        # archivo final SIEMPRE tenga audio, aunque Instagram entregue
-        # las pistas separadas.
-        ydl_opts["format"] = FORMATO_YTDLP_POR_CALIDAD_MP4[calidad]
-        ydl_opts["merge_output_format"] = "mp4"
-    else:
-        # mp3: bajamos solo la mejor pista de audio disponible y la
-        # convertimos a mp3 con el bitrate elegido.
-        ydl_opts["format"] = "bestaudio/best"
-        ydl_opts["postprocessors"] = [
+    if formato == "MP3":
+        opts["format"] = "bestaudio/best"
+        opts["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": BITRATE_POR_CALIDAD_MP3[calidad],
+                "preferredquality": CALIDADES_MP3.get(calidad, "192"),
             }
         ]
-
-    # Si en el arranque del servidor se preparó un cookies.txt (ver
-    # `preparar_cookies_escribibles`), lo usamos. Esto ayuda quando el
-    # sitio exige estar logueado (YouTube con "confirmá que no sos un bot",
-    # posts/reels privados, videos de Facebook que piden login, etc.)
-    if RUNTIME_COOKIES.exists():
-        ydl_opts["cookiefile"] = str(RUNTIME_COOKIES)
-
-    extension_esperada = "mp3" if formato == FormatoDescarga.mp3 else "mp4"
+        extension_esperada = ".mp3"
+    else:
+        if calidad == "La mejor (recomendado)":
+            if hay_ffmpeg:
+                opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                opts["merge_output_format"] = "mp4"
+            else:
+                opts["format"] = "best[ext=mp4]/best"
+        else:
+            altura = calidad.replace("p", "")
+            if hay_ffmpeg:
+                opts["format"] = (
+                    f"bestvideo[height<={altura}][ext=mp4]+bestaudio[ext=m4a]/"
+                    f"best[height<={altura}][ext=mp4]/best[height<={altura}]/"
+                    f"best[ext=mp4]/best"
+                )
+                opts["merge_output_format"] = "mp4"
+            else:
+                opts["format"] = (
+                    f"best[height<={altura}][ext=mp4]/best[height<={altura}]/"
+                    f"best[ext=mp4]/best"
+                )
+        extension_esperada = ".mp4"
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            final_path = Path(filename)
-            # Con postprocesamiento (mp3) o merge (mp4), la extensión final
-            # puede diferir de la que reporta prepare_filename, así que
-            # verificamos y ajustamos si hace falta.
-            if not final_path.exists():
-                alt_path = final_path.with_suffix(f".{extension_esperada}")
-                if alt_path.exists():
-                    final_path = alt_path
 
-        if not final_path.exists():
-            raise HTTPException(status_code=500, detail="No se pudo generar el archivo de salida")
+        candidatos = [
+            f for f in DOWNLOAD_DIR.glob(f"{job_id}.*") if f.suffix not in (".part", ".ytdl")
+        ]
+        if not candidatos:
+            raise HTTPException(status_code=500, detail="No se generó el archivo descargado")
+        archivo_final = candidatos[0]
 
-        media_type = "audio/mpeg" if formato == FormatoDescarga.mp3 else "video/mp4"
+        # Calculamos la etiqueta de calidad real (igual que en la versión
+        # de Windows), para que la app pueda armar el nombre del archivo.
+        if formato == "MP3":
+            if calidad == "La mejor calidad":
+                abr = (info or {}).get("abr")
+                etiqueta_calidad = f"{int(round(abr))}kbps" if abr else "mejorcalidad"
+            else:
+                etiqueta_calidad = calidad.replace(" ", "")
+        else:
+            if calidad == "La mejor (recomendado)":
+                altura = (info or {}).get("height")
+                etiqueta_calidad = f"{altura}p" if altura else "mejorcalidad"
+            else:
+                etiqueta_calidad = calidad
 
-        return FileResponse(
-            path=str(final_path),
-            filename=f"descarga_{job_id}.{extension_esperada}",
+        titulo = _obtener_titulo(info)
+        media_type = "audio/mpeg" if archivo_final.suffix == ".mp3" else "video/mp4"
+
+        response = FileResponse(
+            path=str(archivo_final),
+            filename=f"{job_id}{archivo_final.suffix}",
             media_type=media_type,
         )
+        # Headers custom para que la app arme el nombre final del archivo.
+        # Los HTTP headers no soportan caracteres no-ASCII directo, por eso
+        # van codificados con quote() y la app los decodifica al leerlos.
+        response.headers["X-Titulo"] = urllib.parse.quote(titulo)
+        response.headers["X-Calidad"] = urllib.parse.quote(etiqueta_calidad)
+        response.headers["X-Extension-Real"] = archivo_final.suffix
+        return response
 
+    except HTTPException:
+        raise
     except yt_dlp.utils.DownloadError as e:
-        # Este es el error más común cuando el sitio cambia algo o el
-        # contenido es privado / no existe. Lo devolvemos como mensaje claro.
-        raise HTTPException(status_code=422, detail=f"No se pudo descargar el archivo: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"No se pudo descargar el video: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error inesperado: {str(e)}")
 
 
 @app.on_event("startup")
-def preparar_cookies_escribibles():
-    """
-    Copia el archivo de cookies a una ubicación temporal donde yt-dlp SÍ
-    puede escribir (Render monta /etc/secrets como solo lectura).
-
-    Prioridad:
-      1) Render Secret File en /etc/secrets/cookies.txt (forma segura,
-         nunca pasa por GitHub).
-      2) Un cookies.txt junto al código (solo para pruebas locales; no
-         subir esto a un repo público, expone tu sesión iniciada).
-    """
-    origen = None
-    if RENDER_SECRET_COOKIES.exists():
-        origen = RENDER_SECRET_COOKIES
-    elif LOCAL_COOKIES.exists():
-        origen = LOCAL_COOKIES
-
-    if origen is not None:
-        try:
-            shutil.copyfile(origen, RUNTIME_COOKIES)
-        except Exception:
-            # Si por algún motivo falla la copia, seguimos sin cookies en
-            # vez de tirar abajo el arranque del servidor.
-            pass
-
-
-@app.on_event("startup")
 def cleanup_old_files():
-    """Limpia archivos viejos al arrancar, por si quedaron de una ejecución anterior."""
     for f in DOWNLOAD_DIR.glob("*"):
         try:
             f.unlink()
