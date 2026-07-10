@@ -108,6 +108,45 @@ def health_check():
     return {"status": "ok", "service": "video-downloader-backend"}
 
 
+@app.get("/debug-formats")
+def debug_formats(url: str = Query(...)):
+    """
+    Endpoint TEMPORAL de diagnóstico: lista los formatos que yt-dlp
+    encuentra para un video, sin descargar nada. Sirve para entender por
+    qué el selector de formato normal no encuentra coincidencias.
+    """
+    if not _es_url_valida(url):
+        raise HTTPException(status_code=400, detail="URL inválida")
+
+    cookies_path = _ruta_cookies()
+    opts, hay_ffmpeg = _opciones_base(cookies_path)
+    opts["skip_download"] = True
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        formatos = info.get("formats", []) or []
+        resumen = [
+            {
+                "format_id": f.get("format_id"),
+                "ext": f.get("ext"),
+                "height": f.get("height"),
+                "acodec": f.get("acodec"),
+                "vcodec": f.get("vcodec"),
+            }
+            for f in formatos
+        ]
+        return {
+            "cantidad_formatos": len(resumen),
+            "hay_ffmpeg": hay_ffmpeg,
+            "hay_cookies": cookies_path is not None,
+            "formatos": resumen,
+        }
+    except Exception as e:
+        return {"error": str(e), "hay_cookies": cookies_path is not None}
+
+
 @app.get("/info")
 def obtener_info(url: str = Query(...)):
     """Devuelve solo el título, sin descargar nada (para sugerir el nombre
